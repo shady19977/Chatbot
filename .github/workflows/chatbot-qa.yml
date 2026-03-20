@@ -186,13 +186,14 @@ jobs:
         uses: dawidd6/action-send-mail@v3
         continue-on-error: true
         with:
-          server_address: ${{ secrets.MAIL_SERVER || 'localhost' }}
-          server_port: ${{ secrets.MAIL_PORT || '587' }}
-          username: ${{ secrets.MAIL_USERNAME || 'noreply' }}
-          password: ${{ secrets.MAIL_PASSWORD || 'noreply' }}
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: shadyahmed.n8n@gmail.com
+          password: rpco bzkn fdml qajc
+          secure: true
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
           to: 'shadyahmed9719@gmail.com,shadyahmedmohamed97@gmail.com,s.ahmed.tr@t2.sa'
-          from: 'github-actions@noreply.github.com'
+          from: 'shadyahmed.n8n@gmail.com'
           body: |
             QA Automation Report
             ════════════════════════════════════════════════════════════
