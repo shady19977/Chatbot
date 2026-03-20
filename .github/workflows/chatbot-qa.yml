@@ -27,9 +27,10 @@ on:
         required: false
         default: 'data/questions.csv'
 
-# Allow workflow to push commits and send emails
+# Allow workflow to push commits and create issues
 permissions:
   contents: write
+  issues: write
 
 # ── Job ───────────────────────────────────────────────────────────────────────
 jobs:
@@ -206,19 +207,25 @@ jobs:
         if: always()
         uses: actions/github-script@v7
         continue-on-error: true
+        env:
+          CSV_NAME: ${{ steps.csv_file.outputs.csv_name }}
+          CSV_PATH: ${{ steps.csv_file.outputs.csv_path }}
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            const csvFile = '${{ steps.csv_file.outputs.csv_name }}';
-            const csvPath = '${{ steps.csv_file.outputs.csv_path }}';
+            const csvFile = process.env.CSV_NAME || 'results.csv';
+            const repoUrl = context.repo.owner + '/' + context.repo.repo;
             
-            github.rest.issues.create({
+            await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: 'QA Report - Run #${{ github.run_number }}',
-              body: 'QA Automation Report\n\nRepository: ${{ github.repository }}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\n\nFiles Committed:\n- index.html\n- ' + csvFile + '\n\nRun URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nView Report: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html',
+              body: `QA Automation Report\n\nRepository: ${repoUrl}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\nTriggered: ${{ github.actor }}\n\nFiles Committed:\n- index.html\n- ${csvFile}\n\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nReport: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html`,
               labels: ['qa-report', 'automated']
             });
+            
+            console.log('✅ QA Report Issue created successfully');
+
 
 
       # ── 14. Print workflow summary ─────────────────────────────────────────────
