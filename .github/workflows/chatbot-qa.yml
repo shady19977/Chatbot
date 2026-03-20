@@ -74,7 +74,7 @@ jobs:
           OUTPUT_DIR: results
           CHAT_RESPONSE_TIMEOUT_MS: '120000'
           INTER_QUESTION_DELAY_MS: '2000'
-        run: npx playwright test --project=chromium
+        run: npx playwright test --project=chromium --workers=4
         continue-on-error: true
 
       # ── 7. Find and store latest CSV file path ─────────────────────────────────
