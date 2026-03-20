@@ -76,12 +76,6 @@ jobs:
         run: npx playwright test --project=chromium
         continue-on-error: true
 
-      # ── 6. Evaluate chatbot answers ────────────────────────────────────────────
-      - name: Evaluate chatbot answers
-        if: always()
-        run: node scripts/evaluate-answers.js
-        continue-on-error: true
-
       # ── 7. Find and store latest CSV file path ─────────────────────────────────
       - name: Find latest CSV file
         id: csv_file
