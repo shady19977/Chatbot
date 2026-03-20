@@ -188,11 +188,11 @@ jobs:
         with:
           server_address: smtp.gmail.com
           server_port: 465
-          username: shadyahmed.n8n@gmail.com
-          password: rpco bzkn fdml qajc
+          username: <gmail account email>
+          password: <App password generated from Gmail account>
           secure: true
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
-          to: 'shadyahmed9719@gmail.com'
+          to: '<gmail account email>'
           from: '<gmail account email>'
           body: |
             Chatbot QA Automation Report
