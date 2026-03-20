@@ -1,0 +1,239 @@
+name: Chatbot QA Automation
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main, master, develop]
+    paths-ignore:
+      - 'playwright-report/**'
+      - 'results/**'
+      - '**.md'
+      - 'index.html'
+
+  pull_request:
+    branches: [main, master]
+    paths-ignore:
+      - 'playwright-report/**'
+      - 'results/**'
+
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Base URL of the target application (leave blank for default)'
+        required: false
+        default: ''
+      input_csv:
+        description: 'Path to questions CSV relative to repo root'
+        required: false
+        default: 'data/questions.csv'
+
+# Allow workflow to push commits and send emails
+permissions:
+  contents: write
+
+# ── Job ───────────────────────────────────────────────────────────────────────
+jobs:
+  chatbot-qa:
+    name: Run Chatbot QA, Commit Report & Send Email
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. Checkout repository ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Setup Node.js 20 ───────────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────────
+      - name: Install dependencies
+        run: npm ci
+
+      # ── 4. Install Playwright Chromium ─────────────────────────────────────────
+      - name: Install Playwright Chromium + OS dependencies
+        run: npx playwright install chromium --with-deps
+
+      # ── 5. Run Playwright tests ────────────────────────────────────────────────
+      - name: Run Playwright tests
+        env:
+          CI: 'true'
+          BASE_URL: ${{ github.event.inputs.base_url || secrets.BASE_URL || 'http://hasibcore.hasib.com.sa:8090' }}
+          LOGIN_PATH: ${{ secrets.LOGIN_PATH || '/HPA.NBU/#!/login' }}
+          APP_USERNAME: ${{ secrets.APP_USERNAME || 'portaladmin' }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD || '1234560' }}
+          INPUT_CSV: ${{ github.event.inputs.input_csv || 'data/questions.csv' }}
+          OUTPUT_DIR: results
+          CHAT_RESPONSE_TIMEOUT_MS: '120000'
+          INTER_QUESTION_DELAY_MS: '2000'
+        run: npx playwright test --project=chromium
+        continue-on-error: true
+
+      # ── 6. Evaluate chatbot answers ────────────────────────────────────────────
+      - name: Evaluate chatbot answers
+        if: always()
+        run: node scripts/evaluate-answers.js
+        continue-on-error: true
+
+      # ── 7. Find and store latest CSV file path ─────────────────────────────────
+      - name: Find latest CSV file
+        id: csv_file
+        if: always()
+        run: |
+          LATEST_CSV=$(find results/ -name "*.csv" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+          if [ -z "$LATEST_CSV" ]; then
+            echo "csv_found=false" >> $GITHUB_OUTPUT
+            echo "csv_path=" >> $GITHUB_OUTPUT
+            echo "csv_name=no-results.csv" >> $GITHUB_OUTPUT
+          else
+            echo "csv_found=true" >> $GITHUB_OUTPUT
+            echo "csv_path=$LATEST_CSV" >> $GITHUB_OUTPUT
+            echo "csv_name=$(basename $LATEST_CSV)" >> $GITHUB_OUTPUT
+            echo "✅ Latest CSV found: $LATEST_CSV"
+          fi
+
+      # ── 8. Compress all logs and reports as ZIP ────────────────────────────────
+      - name: Compress logs and playwright report
+        if: always()
+        run: |
+          mkdir -p artifacts
+          
+          # Compress results folder
+          if [ -d "results" ]; then
+            zip -r artifacts/logs-run-${{ github.run_number }}.zip results/ -q 2>/dev/null || true
+            echo "✅ Created logs-run-${{ github.run_number }}.zip"
+          fi
+          
+          # Compress playwright-report folder
+          if [ -d "playwright-report" ]; then
+            zip -r artifacts/playwright-report-run-${{ github.run_number }}.zip playwright-report/ -q 2>/dev/null || true
+            echo "✅ Created playwright-report-run-${{ github.run_number }}.zip"
+          fi
+          
+          ls -lh artifacts/
+
+      # ── 9. Git - Configure user identity ───────────────────────────────────────
+      - name: Configure git
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 10. Git - Pull latest changes ──────────────────────────────────────────
+      - name: Pull latest changes
+        if: always()
+        run: |
+          git pull --rebase origin "${{ github.ref_name }}" || true
+
+      # ── 11. Git - Stage only index.html and latest CSV ─────────────────────────
+      - name: Stage index.html and CSV for commit
+        if: always()
+        run: |
+          git add index.html 2>/dev/null || true
+          
+          if [ "${{ steps.csv_file.outputs.csv_found }}" = "true" ]; then
+            git add "${{ steps.csv_file.outputs.csv_path }}" 2>/dev/null || true
+            echo "✅ Staged: index.html + ${{ steps.csv_file.outputs.csv_name }}"
+          else
+            echo "⚠️  No CSV file found, staging only index.html"
+          fi
+
+      # ── 12. Git - Commit and push ──────────────────────────────────────────────
+      - name: Commit and push to branch
+        if: always()
+        run: |
+          if git diff --cached --quiet; then
+            echo "ℹ️  No changes to commit"
+            exit 0
+          fi
+          
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          git commit -m "ci(report): QA run #${{ github.run_number }} — ${TIMESTAMP}" -m "Branch  : ${{ github.ref_name }}" -m "Actor   : ${{ github.actor }}" -m "Run URL : ${RUN_URL}" -m "[skip ci]"
+          
+          git push origin "HEAD:${{ github.ref_name }}"
+          echo "✅ Pushed index.html + CSV to ${{ github.ref_name }}"
+
+      # ── 13. Send email with report, CSV, and logs ──────────────────────────────
+      - name: Send QA Report Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
+          to: 'shadyahmed9719@gmail.com,s.ahmed.tr@t2.sa'
+          from: ${{ secrets.MAIL_FROM }}
+          body: |
+            QA Automation Report
+            ════════════════════════════════════════════════════════════
+            
+            📊 Run Information:
+              Repository  : ${{ github.repository }}
+              Branch      : ${{ github.ref_name }}
+              Run Number  : #${{ github.run_number }}
+              Triggered   : ${{ github.actor }}
+              Timestamp   : ${{ job.status }}
+            
+            📁 Attached Files:
+              ✓ index.html (Evaluation Report)
+              ✓ ${{ steps.csv_file.outputs.csv_name }} (Latest Results CSV)
+              ✓ logs-run-${{ github.run_number }}.zip (Compressed Logs)
+              ✓ playwright-report-run-${{ github.run_number }}.zip (Playwright Report)
+            
+            🔗 View on GitHub:
+              https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html
+            
+            📋 Files Committed:
+              ✓ index.html
+              ✓ ${{ steps.csv_file.outputs.csv_name }}
+            
+            ════════════════════════════════════════════════════════════
+            Generated by GitHub Actions
+          attachments: |
+            index.html,
+            ${{ steps.csv_file.outputs.csv_path }},
+            artifacts/logs-run-${{ github.run_number }}.zip,
+            artifacts/playwright-report-run-${{ github.run_number }}.zip
+
+      # ── 14. Print workflow summary ─────────────────────────────────────────────
+      - name: Print workflow summary
+        if: always()
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════════════════════"
+          echo "  ✅ QA Automation Workflow Completed"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+          echo "  📊 Repository: ${{ github.repository }}"
+          echo "  🌿 Branch    : ${{ github.ref_name }}"
+          echo "  🔢 Run       : #${{ github.run_number }}"
+          echo ""
+          echo "  📝 Committed to GitHub:"
+          echo "     ✓ index.html"
+          echo "     ✓ ${{ steps.csv_file.outputs.csv_name }}"
+          echo ""
+          echo "  📧 Email Recipients:"
+          echo "     ✓ shadyahmed9719@gmail.com"
+          echo "     ✓ s.ahmed.tr@t2.sa"
+          echo ""
+          echo "  📎 Email Attachments:"
+          echo "     ✓ index.html"
+          echo "     ✓ ${{ steps.csv_file.outputs.csv_name }}"
+          echo "     ✓ logs-run-${{ github.run_number }}.zip"
+          echo "     ✓ playwright-report-run-${{ github.run_number }}.zip"
+          echo ""
+          echo "  🔗 GitHub URL:"
+          echo "     https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html"
+          echo ""
+          echo "════════════════════════════════════════════════════════════"

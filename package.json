@@ -1,0 +1,21 @@
+{
+  "name": "chatbot-qa-automation",
+  "version": "2.0.0",
+  "description": "Production-grade Playwright automation for chatbot Q&A testing with CSV I/O",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}
