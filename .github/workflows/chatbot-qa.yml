@@ -66,7 +66,7 @@ jobs:
         env:
           CI: 'true'
           BASE_URL: ${{ github.event.inputs.base_url || secrets.BASE_URL || 'http://hasibcore.hasib.com.sa:8090' }}
-          LOGIN_PATH: ${{ secrets.LOGIN_PATH || '/HPA.NBU/#!/login' }}
+          LOGIN_PATH: ${{ secrets.LOGIN_PATH || '/HPA.NBU.V3/#!/login' }}
           APP_USERNAME: ${{ secrets.APP_USERNAME || 'portaladmin' }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD || '1234560' }}
           INPUT_CSV: ${{ github.event.inputs.input_csv || 'data/questions.csv' }}
