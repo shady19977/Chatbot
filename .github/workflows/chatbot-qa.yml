@@ -167,7 +167,7 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
           to: 'shadyahmed9719@gmail.com,shadyahmedmohamed97@gmail.com,s.ahmed.tr@t2.sa'
-          from: ${{ secrets.MAIL_FROM || secrets.MAIL_USERNAME }}
+          from: 'github-actions@noreply.github.com'
           body: |
             QA Automation Report
             ════════════════════════════════════════════════════════════
