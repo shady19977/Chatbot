@@ -127,20 +127,43 @@ jobs:
         run: |
           git pull --rebase --autostash origin "${{ github.ref_name }}" || true
 
-      # ── 11. Git - Stage only index.html and latest CSV ─────────────────────────
+      # ── 11. Git - Copy index.html from playwright-report to root ─────────────────
+      - name: Copy index.html to root directory
+        if: always()
+        run: |
+          if [ -f "playwright-report/index.html" ]; then
+            cp playwright-report/index.html index.html
+            echo "✅ Copied index.html from playwright-report/ to root"
+          else
+            echo "⚠️  index.html not found in playwright-report/"
+          fi
+
+      # ── 12. Git - Stage index.html and latest CSV ─────────────────────────────
       - name: Stage index.html and CSV for commit
         if: always()
         run: |
-          git add index.html 2>/dev/null || true
-          
-          if [ "${{ steps.csv_file.outputs.csv_found }}" = "true" ]; then
-            git add "${{ steps.csv_file.outputs.csv_path }}" 2>/dev/null || true
-            echo "✅ Staged: index.html + ${{ steps.csv_file.outputs.csv_name }}"
+          # Stage copied index.html from root
+          if [ -f "index.html" ]; then
+            git add index.html
+            echo "✅ Staged: index.html (from root)"
           else
-            echo "⚠️  No CSV file found, staging only index.html"
+            echo "⚠️  index.html not found in root directory"
           fi
+          
+          # Stage latest CSV from results folder
+          if [ "${{ steps.csv_file.outputs.csv_found }}" = "true" ]; then
+            git add "${{ steps.csv_file.outputs.csv_path }}"
+            echo "✅ Staged: ${{ steps.csv_file.outputs.csv_name }} (from results/)"
+          else
+            echo "⚠️  No CSV file found in results folder"
+          fi
+          
+          # Show what's staged
+          echo ""
+          echo "📋 Staged files:"
+          git diff --cached --name-only
 
-      # ── 12. Git - Commit and push ──────────────────────────────────────────────
+      # ── 13. Git - Commit and push ──────────────────────────────────────────────
       - name: Commit and push to branch
         if: always()
         run: |
@@ -157,7 +180,7 @@ jobs:
           git push origin "HEAD:${{ github.ref_name }}"
           echo "✅ Pushed index.html + CSV to ${{ github.ref_name }}"
 
-      # ── 13. Send email with report, CSV, and logs ──────────────────────────────
+      # ── 14. Send email with report, CSV, and logs ──────────────────────────────
       - name: Send QA Report Email
         if: always()
         uses: dawidd6/action-send-mail@v3
@@ -202,7 +225,7 @@ jobs:
             artifacts/logs-run-${{ github.run_number }}.zip,
             artifacts/playwright-report-run-${{ github.run_number }}.zip
 
-      # ── 13b. Create GitHub Issue with QA Report ───────────────────────────────
+      # ── 15. Create GitHub Issue with QA Report ───────────────────────────────
       - name: Create QA Report Issue
         if: always()
         uses: actions/github-script@v7
@@ -220,7 +243,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: 'QA Report - Run #${{ github.run_number }}',
-              body: `QA Automation Report\n\nRepository: ${repoUrl}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\nTriggered: ${{ github.actor }}\n\nFiles Committed:\n- index.html\n- ${csvFile}\n\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nReport: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html`,
+              body: `QA Automation Report\n\nRepository: ${repoUrl}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\nTriggered: ${{ github.actor }}\n\nFiles Committed:\n- index.html (from playwright-report/)\n- ${csvFile} (from results/)\n\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nReport: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html`,
               labels: ['qa-report', 'automated']
             });
             
@@ -228,7 +251,7 @@ jobs:
 
 
 
-      # ── 14. Print workflow summary ─────────────────────────────────────────────
+      # ── 16. Print workflow summary ─────────────────────────────────────────────
       - name: Print workflow summary
         if: always()
         run: |
@@ -242,11 +265,12 @@ jobs:
           echo "  🔢 Run       : #${{ github.run_number }}"
           echo ""
           echo "  📝 Committed to GitHub:"
-          echo "     ✓ index.html"
-          echo "     ✓ ${{ steps.csv_file.outputs.csv_name }}"
+          echo "     ✓ index.html (copied from playwright-report/)"
+          echo "     ✓ ${{ steps.csv_file.outputs.csv_name }} (latest from results/)"
           echo ""
           echo "  📧 Email Recipients:"
           echo "     ✓ shadyahmed9719@gmail.com"
+          echo "     ✓ shadyahmedmohamed97@gmail.com"
           echo "     ✓ s.ahmed.tr@t2.sa"
           echo ""
           echo "  📎 Email Attachments:"
