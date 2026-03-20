@@ -124,7 +124,7 @@ jobs:
       - name: Pull latest changes
         if: always()
         run: |
-          git pull --rebase origin "${{ github.ref_name }}" || true
+          git pull --rebase --autostash origin "${{ github.ref_name }}" || true
 
       # ── 11. Git - Stage only index.html and latest CSV ─────────────────────────
       - name: Stage index.html and CSV for commit
@@ -166,8 +166,8 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
-          to: 'shadyahmed9719@gmail.com,s.ahmed.tr@t2.sa'
-          from: ${{ secrets.MAIL_FROM }}
+          to: 'shadyahmed9719@gmail.com,shadyahmedmohamed97@gmail.com,s.ahmed.tr@t2.sa'
+          from: ${{ secrets.MAIL_FROM || secrets.MAIL_USERNAME }}
           body: |
             QA Automation Report
             ════════════════════════════════════════════════════════════
