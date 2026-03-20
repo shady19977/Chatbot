@@ -188,11 +188,11 @@ jobs:
         with:
           server_address: smtp.gmail.com
           server_port: 465
-          username: <gmail account email>
-          password: <app password for gmail account>
+          username: shadyahmed.n8n@gmail.com
+          password: rpco bzkn fdml qajc
           secure: true
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
-          to: 'email1@gmail.com,email2@gmail.com'
+          to: 'shadyahmed9719@gmail.com'
           from: '<gmail account email>'
           body: |
             Chatbot QA Automation Report
@@ -212,7 +212,7 @@ jobs:
               ✓ playwright-report-run-${{ github.run_number }}.zip (Playwright Report)
             
             🔗 View on GitHub:
-              https://github.com/${{ github.repository }}/${{ github.ref_name }}/index.html
+              https://${{ github.ref_name }}.github.io/${{ github.repository }}
             
             📋 Files Committed:
               ✓ index.html
