@@ -160,11 +160,12 @@ jobs:
       - name: Send QA Report Email
         if: always()
         uses: dawidd6/action-send-mail@v3
+        continue-on-error: true
         with:
-          server_address: ${{ secrets.MAIL_SERVER }}
-          server_port: ${{ secrets.MAIL_PORT }}
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
+          server_address: ${{ secrets.MAIL_SERVER || 'localhost' }}
+          server_port: ${{ secrets.MAIL_PORT || '587' }}
+          username: ${{ secrets.MAIL_USERNAME || 'noreply' }}
+          password: ${{ secrets.MAIL_PASSWORD || 'noreply' }}
           subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
           to: 'shadyahmed9719@gmail.com,shadyahmedmohamed97@gmail.com,s.ahmed.tr@t2.sa'
           from: 'github-actions@noreply.github.com'
@@ -199,6 +200,26 @@ jobs:
             ${{ steps.csv_file.outputs.csv_path }},
             artifacts/logs-run-${{ github.run_number }}.zip,
             artifacts/playwright-report-run-${{ github.run_number }}.zip
+
+      # ── 13b. Create GitHub Issue with QA Report ───────────────────────────────
+      - name: Create QA Report Issue
+        if: always()
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const fs = require('fs');
+            const csvFile = '${{ steps.csv_file.outputs.csv_name }}';
+            const csvPath = '${{ steps.csv_file.outputs.csv_path }}';
+            
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'QA Report - Run #${{ github.run_number }}',
+              body: 'QA Automation Report\n\nRepository: ${{ github.repository }}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\n\nFiles Committed:\n- index.html\n- ' + csvFile + '\n\nRun URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nView Report: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html',
+              labels: ['qa-report', 'automated']
+            });
+
 
       # ── 14. Print workflow summary ─────────────────────────────────────────────
       - name: Print workflow summary
