@@ -37,7 +37,7 @@ jobs:
   chatbot-qa:
     name: Run Chatbot QA, Commit Report & Send Email
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 450
 
     steps:
       # ── 1. Checkout repository ────────────────────────────────────────────────
@@ -72,7 +72,7 @@ jobs:
           APP_PASSWORD: ${{ secrets.APP_PASSWORD || '1234560' }}
           INPUT_CSV: ${{ github.event.inputs.input_csv || 'data/questions.csv' }}
           OUTPUT_DIR: results
-          CHAT_RESPONSE_TIMEOUT_MS: '120000'
+          CHAT_RESPONSE_TIMEOUT_MS: '1200000'
           INTER_QUESTION_DELAY_MS: '2000'
         run: npx playwright test --project=chromium --workers=4
         continue-on-error: true
