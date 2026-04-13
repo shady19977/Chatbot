@@ -293,24 +293,10 @@ pipeline {
             steps {
                 echo "🗜  Packaging artifacts → ${env.ZIP_NAME}"
                 script {
-                    // Simple working PowerShell command for Windows
-                    bat """
-                        powershell -Command "& {
-                            if (Test-Path '${env.REPORT_DIR}') {
-                                Compress-Archive -Path '${env.REPORT_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Force;
-                                Write-Host 'HTML report packaged';
-                            }
-                            if (Test-Path '${env.RESULTS_DIR}') {
-                                Compress-Archive -Path '${env.RESULTS_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Update;
-                                Write-Host 'Test results packaged';
-                            }
-                            if (!(Test-Path '${env.REPORT_DIR}') -and !(Test-Path '${env.RESULTS_DIR}')) {
-                                Write-Host 'No artifacts to package';
-                            } else {
-                                Write-Host 'ZIP created: ${env.ZIP_NAME}';
-                            }
-                        }"
-                    """
+                    // Simple working PowerShell command - one line only
+                    bat "powershell -Command \"if (Test-Path '${env.REPORT_DIR}') { Compress-Archive -Path '${env.REPORT_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Force }\""
+                    bat "powershell -Command \"if (Test-Path '${env.RESULTS_DIR}') { Compress-Archive -Path '${env.RESULTS_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Update }\""
+                    echo "✅ Packaging complete: ${env.ZIP_NAME}"
                 }
             }
         }
@@ -423,7 +409,7 @@ def sendPlaywrightEmail() {
     <table>
       <tr><th>Parameter</th><th>Value</th></tr>
       <tr><td>Status</th>           <td><span class="badge">${status}</span></td></tr>
-      <tr><td>Browser</th>           <td>${params.BROWSER}</td></tr>
+      <tr><td>Browser</th>           <td>${params.BROWSER}</td><tr>
       <tr><td>Test Selection</th>    <td>${params.TEST_SELECTION_MODE}</td></tr>
       <tr><td>Test Files</th>        <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
       <tr><td>Parallel Workers</th>  <td>${params.PARALLEL_WORKERS}</td></tr>
