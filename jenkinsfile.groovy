@@ -291,32 +291,25 @@ pipeline {
         stage('📦  Package Artifacts') {
         // ─────────────────────────────────────────────────────
             steps {
-                echo "🗜  Packaging screenshots, logs, videos, reports → ${env.ZIP_NAME}"
+                echo "🗜  Packaging artifacts → ${env.ZIP_NAME}"
                 script {
-                    // Windows-compatible packaging using PowerShell
+                    // Simple working PowerShell command for Windows
                     bat """
-                        @echo off
-                        powershell -Command "
-                            \$filesToZip = @();
-                            if (Test-Path '${env.REPORT_DIR}') { 
-                                \$filesToZip += Get-ChildItem -Path '${env.REPORT_DIR}' -Recurse
-                                Write-Host 'HTML report found'
-                            } else { 
-                                Write-Host 'No HTML report dir' 
+                        powershell -Command "& {
+                            if (Test-Path '${env.REPORT_DIR}') {
+                                Compress-Archive -Path '${env.REPORT_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Force;
+                                Write-Host 'HTML report packaged';
                             }
-                            if (Test-Path '${env.RESULTS_DIR}') { 
-                                \$filesToZip += Get-ChildItem -Path '${env.RESULTS_DIR}' -Recurse
-                                Write-Host 'Test results found'
-                            } else { 
-                                Write-Host 'No test-results dir' 
+                            if (Test-Path '${env.RESULTS_DIR}') {
+                                Compress-Archive -Path '${env.RESULTS_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Update;
+                                Write-Host 'Test results packaged';
                             }
-                            if (\$filesToZip.Count -gt 0) {
-                                Compress-Archive -Path \$filesToZip -DestinationPath '${env.ZIP_NAME}' -Force
-                                Write-Host 'ZIP created: ${env.ZIP_NAME}'
+                            if (!(Test-Path '${env.REPORT_DIR}') -and !(Test-Path '${env.RESULTS_DIR}')) {
+                                Write-Host 'No artifacts to package';
                             } else {
-                                Write-Host 'No files to zip'
+                                Write-Host 'ZIP created: ${env.ZIP_NAME}';
                             }
-                        "
+                        }"
                     """
                 }
             }
@@ -429,15 +422,15 @@ def sendPlaywrightEmail() {
     <h3 style="margin-top:0">📊 Execution Summary</h3>
     <table>
       <tr><th>Parameter</th><th>Value</th></tr>
-      <tr><td>Status</td>           <td><span class="badge">${status}</span></td></tr>
-      <tr><td>Browser</td>          <td>${params.BROWSER}</td></tr>
-      <tr><td>Test Selection</td>   <td>${params.TEST_SELECTION_MODE}</td></tr>
-      <tr><td>Test Files</td>       <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
-      <tr><td>Parallel Workers</td> <td>${params.PARALLEL_WORKERS}</td></tr>
-      <tr><td>Git Branch</td>       <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td></tr>
-      <tr><td>Git Commit</td>       <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td></tr>
-      <tr><td>Jenkins Node</td>     <td>${NODE_NAME}</td></tr>
-      <tr><td>Duration</td>         <td>${currentBuild.durationString}</td></tr>
+      <tr><td>Status</th>           <td><span class="badge">${status}</span></td></tr>
+      <tr><td>Browser</th>           <td>${params.BROWSER}</td></tr>
+      <tr><td>Test Selection</th>    <td>${params.TEST_SELECTION_MODE}</td></tr>
+      <tr><td>Test Files</th>        <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
+      <tr><td>Parallel Workers</th>  <td>${params.PARALLEL_WORKERS}</td></tr>
+      <tr><td>Git Branch</th>        <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td></tr>
+      <tr><td>Git Commit</th>        <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td></tr>
+      <tr><td>Jenkins Node</th>      <td>${NODE_NAME}</td></tr>
+      <tr><td>Duration</th>          <td>${currentBuild.durationString}</td></tr>
     </table>
 
     <h3>🔗 Quick Links</h3>
@@ -448,7 +441,7 @@ def sendPlaywrightEmail() {
 
     <h3 style="margin-top:24px">📎 Attachments in this email</h3>
     <ul style="font-size:13px; line-height:1.9">
-      <li><b>playwright-artifacts-build-${BUILD_NUMBER}.zip</b> — Full report, screenshots, videos, logs</li>
+      <li><b>${ZIP_NAME}</b> — Full report, screenshots, videos, logs</li>
       <li><b>build.log</b> — Jenkins console output for this build</li>
     </ul>
 
