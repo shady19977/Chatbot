@@ -174,8 +174,9 @@ pipeline {
                     branch    : 'master'
                 )
                 script {
-                    env.GIT_SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    env.GIT_BRANCH_NAME  = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    // Windows-compatible git commands
+                    env.GIT_SHORT_COMMIT = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.GIT_BRANCH_NAME  = bat(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
                     echo "✅  Checked out branch '${env.GIT_BRANCH_NAME}' @ ${env.GIT_SHORT_COMMIT}"
                 }
             }
@@ -205,15 +206,16 @@ pipeline {
                 script {
                     echo "🔍  Scanning for spec files in ./tests …"
 
+                    // Windows-compatible file discovery
                     def rawOutput = bat(
-                        script: 'dir /s /b tests\\*.spec.ts tests\\*.test.ts 2>nul',
+                        script: '@echo off & for /r "tests" %i in (*.spec.ts *.test.ts) do @echo %i',
                         returnStdout: true
                     ).trim()
 
                     def discovered = rawOutput
                         .split(/\r?\n/)
                         .collect { it.trim() }
-                        .findAll  { it }
+                        .findAll  { it && !it.contains("File not found") }
 
                     if (discovered.isEmpty()) {
                         error("❌  No *.spec.ts / *.test.ts files found under ./tests")
@@ -277,17 +279,30 @@ pipeline {
             steps {
                 echo "🗜  Packaging screenshots, logs, videos, reports → ${env.ZIP_NAME}"
                 script {
-                    // Gracefully skip missing directories
+                    // Windows-compatible packaging using PowerShell
                     bat """
                         @echo off
-                        if exist ${env.REPORT_DIR} (echo HTML report found) else (echo No HTML report dir)
-                        if exist ${env.RESULTS_DIR} (echo Test results found) else (echo No test-results dir)
-
-                        tar -a -c -f ${env.ZIP_NAME} ^
-                            --ignore-failed-read ^
-                            "${env.REPORT_DIR}" ^
-                            "${env.RESULTS_DIR}"
-                        echo ZIP created: ${env.ZIP_NAME}
+                        powershell -Command "
+                            \$filesToZip = @();
+                            if (Test-Path '${env.REPORT_DIR}') { 
+                                \$filesToZip += Get-ChildItem -Path '${env.REPORT_DIR}' -Recurse
+                                Write-Host 'HTML report found'
+                            } else { 
+                                Write-Host 'No HTML report dir' 
+                            }
+                            if (Test-Path '${env.RESULTS_DIR}') { 
+                                \$filesToZip += Get-ChildItem -Path '${env.RESULTS_DIR}' -Recurse
+                                Write-Host 'Test results found'
+                            } else { 
+                                Write-Host 'No test-results dir' 
+                            }
+                            if (\$filesToZip.Count -gt 0) {
+                                Compress-Archive -Path \$filesToZip -DestinationPath '${env.ZIP_NAME}' -Force
+                                Write-Host 'ZIP created: ${env.ZIP_NAME}'
+                            } else {
+                                Write-Host 'No files to zip'
+                            }
+                        "
                     """
                 }
             }
@@ -400,15 +415,15 @@ def sendPlaywrightEmail() {
     <h3 style="margin-top:0">📊 Execution Summary</h3>
     <table>
       <tr><th>Parameter</th><th>Value</th></tr>
-      <tr><td>Status</td>          <td><span class="badge">${status}</span></td></tr>
-      <tr><td>Browser</td>         <td>${params.BROWSER}</td></tr>
-      <tr><td>Test Selection</td>  <td>${params.TEST_SELECTION_MODE}</td></tr>
-      <tr><td>Test Files</td>      <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
-      <tr><td>Parallel Workers</td><td>${params.PARALLEL_WORKERS}</td></tr>
-      <tr><td>Git Branch</td>      <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td></tr>
-      <tr><td>Git Commit</td>      <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td></tr>
-      <tr><td>Jenkins Node</td>    <td>${NODE_NAME}</td></tr>
-      <tr><td>Duration</td>        <td>${currentBuild.durationString}</td></tr>
+      <tr><td>Status</td>           <td><span class="badge">${status}</span></td></tr>
+      <tr><td>Browser</td>          <td>${params.BROWSER}</td></tr>
+      <tr><td>Test Selection</td>   <td>${params.TEST_SELECTION_MODE}</td></tr>
+      <tr><td>Test Files</td>       <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
+      <tr><td>Parallel Workers</td> <td>${params.PARALLEL_WORKERS}</td></tr>
+      <tr><td>Git Branch</td>       <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td></tr>
+      <tr><td>Git Commit</td>       <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td></tr>
+      <tr><td>Jenkins Node</td>     <td>${NODE_NAME}</td></tr>
+      <tr><td>Duration</td>         <td>${currentBuild.durationString}</td></tr>
     </table>
 
     <h3>🔗 Quick Links</h3>
