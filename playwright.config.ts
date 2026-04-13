@@ -36,6 +36,8 @@ export default defineConfig({
     ],
     ['list'],
     ['json', { outputFile: 'playwright-report/results.json' }],
+    ['junit', { outputFile:   'test-results/junit.xml'           }],
+    ['json',  { outputFile:   'test-results/results.json'        }],
   ],
 
   use: {
@@ -47,6 +49,9 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     trace: 'on-first-retry',
+
+    /* Give every test a clean context */
+    ignoreHTTPSErrors: true,
 
     viewport: { width: 1920, height: 1080 },
 
@@ -66,13 +71,22 @@ export default defineConfig({
     },
   },
 
-  // Output folder for per-test artifacts (screenshots, videos, traces)
-  outputDir: path.join('test-artifacts'),
+  /* Output directory for test artifacts (screenshots, videos, traces) */
+  outputDir: 'test-results',
 
+  /* Browser projects — maps to the BROWSER pipeline parameter */
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use : { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'firefox',
+      use : { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'webkit',
+      use : { ...devices['Desktop Safari'] },
     },
   ],
 });
