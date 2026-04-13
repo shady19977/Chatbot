@@ -174,9 +174,14 @@ pipeline {
                     branch    : 'master'
                 )
                 script {
-                    // Windows-compatible git commands
-                    env.GIT_SHORT_COMMIT = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    env.GIT_BRANCH_NAME  = bat(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    // Windows-compatible git commands with clean output
+                    def gitBranchRaw = bat(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    def gitCommitRaw = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    
+                    // Extract just the last line (the actual output)
+                    env.GIT_BRANCH_NAME = gitBranchRaw.split(/\r?\n/).last()
+                    env.GIT_SHORT_COMMIT = gitCommitRaw.split(/\r?\n/).last()
+                    
                     echo "✅  Checked out branch '${env.GIT_BRANCH_NAME}' @ ${env.GIT_SHORT_COMMIT}"
                 }
             }
@@ -206,16 +211,25 @@ pipeline {
                 script {
                     echo "🔍  Scanning for spec files in ./tests …"
 
-                    // Windows-compatible file discovery
+                    // Windows-compatible file discovery with proper escaping
                     def rawOutput = bat(
-                        script: '@echo off & for /r "tests" %i in (*.spec.ts *.test.ts) do @echo %i',
+                        script: '''
+                            @echo off
+                            if not exist tests (
+                                echo No tests directory found
+                                exit /b 0
+                            )
+                            cd tests
+                            for /r %%i in (*.spec.ts *.test.ts) do @echo %%i
+                            cd ..
+                        ''',
                         returnStdout: true
                     ).trim()
 
                     def discovered = rawOutput
                         .split(/\r?\n/)
                         .collect { it.trim() }
-                        .findAll  { it && !it.contains("File not found") }
+                        .findAll { it && !it.contains("No tests directory") }
 
                     if (discovered.isEmpty()) {
                         error("❌  No *.spec.ts / *.test.ts files found under ./tests")
@@ -323,7 +337,7 @@ pipeline {
                 publishHTML([
                     allowMissing         : true,
                     alwaysLinkToLastBuild: true,
-                    keepAll              : true,      // ← preserves EVERY build's report
+                    keepAll              : true,
                     reportDir            : "${env.REPORT_DIR}",
                     reportFiles          : 'index.html',
                     reportName           : "🎭 Playwright Report — Build #${BUILD_NUMBER}"
@@ -361,7 +375,7 @@ pipeline {
         always {
             echo "🧹  Workspace cleanup …"
             cleanWs(
-                cleanWhenSuccess   : false,   // keep artifacts on success for debugging
+                cleanWhenSuccess   : false,
                 cleanWhenUnstable  : false,
                 cleanWhenFailure   : false,
                 cleanWhenNotBuilt  : true
@@ -454,7 +468,7 @@ def sendPlaywrightEmail() {
         subject          : subject,
         body             : body,
         mimeType         : 'text/html',
-        attachLog        : true,           // attaches console log
+        attachLog        : true,
         attachmentsPattern: "${env.ZIP_NAME}",
         compressLog      : true
     )
