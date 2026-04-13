@@ -101,6 +101,8 @@ pipeline {
         BUILD_TS    = "${new Date().format('yyyyMMdd_HHmmss')}"
         REPORT_DIR  = "playwright-report"
         RESULTS_DIR = "test-results"
+        ALLURE_RESULTS = "allure-results"
+        ALLURE_REPORT = "allure-report"
         ZIP_NAME    = "playwright-artifacts-build-${BUILD_NUMBER}.zip"
     }
 
@@ -194,7 +196,13 @@ pipeline {
                 nodejs(nodeJSInstallationName: 'NodeJS-18') {
                     echo "Installing npm packages ..."
                     bat 'npm ci --prefer-offline'
-
+                    
+                    echo "Installing Allure command line tools ..."
+                    bat 'npm install -g allure-commandline'
+                    
+                    echo "Installing Allure reporter for Playwright ..."
+                    bat 'npm install --save-dev allure-playwright'
+                    
                     echo "Installing Playwright browser(s) ..."
                     script {
                         def targets = (params.BROWSER == 'all') ? 'chromium firefox webkit' : params.BROWSER
@@ -261,7 +269,8 @@ pipeline {
 
                     if (params.HEADED_MODE) { cmd += " --headed" }
 
-                    cmd += " --reporter=html,junit,list"
+                    // Add Allure reporter to the list
+                    cmd += " --reporter=html,junit,list,allure-playwright"
 
                     env.PW_TEST_CMD = cmd
                     echo "Resolved command -> ${cmd}"
@@ -288,6 +297,28 @@ pipeline {
         }
 
         // ─────────────────────────────────────────────────────
+        stage('Generate Allure Report') {
+        // ─────────────────────────────────────────────────────
+            steps {
+                echo "Generating Allure report from test results..."
+                script {
+                    // Check if allure-results directory exists and has content
+                    def hasResults = bat(
+                        script: "if exist \"${env.ALLURE_RESULTS}\" (echo EXISTS) else (echo NOT_EXISTS)",
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (hasResults == "EXISTS") {
+                        bat "allure generate ${env.ALLURE_RESULTS} --clean -o ${env.ALLURE_REPORT}"
+                        echo "Allure report generated successfully"
+                    } else {
+                        echo "WARNING: No allure-results found. Skipping report generation."
+                    }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────
         stage('Package Artifacts') {
         // ─────────────────────────────────────────────────────
             steps {
@@ -296,6 +327,8 @@ pipeline {
                     // Simple working PowerShell commands for Windows
                     bat "powershell -Command \"if (Test-Path '${env.REPORT_DIR}') { Compress-Archive -Path '${env.REPORT_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Force }\""
                     bat "powershell -Command \"if (Test-Path '${env.RESULTS_DIR}') { Compress-Archive -Path '${env.RESULTS_DIR}\\*' -DestinationPath '${env.ZIP_NAME}' -Update }\""
+                    bat "powershell -Command \"if (Test-Path '${env.ALLURE_RESULTS}') { Compress-Archive -Path '${env.ALLURE_RESULTS}\\*' -DestinationPath '${env.ZIP_NAME}' -Update }\""
+                    bat "powershell -Command \"if (Test-Path '${env.ALLURE_REPORT}') { Compress-Archive -Path '${env.ALLURE_REPORT}\\*' -DestinationPath '${env.ZIP_NAME}' -Update }\""
                     echo "Packaging complete: ${env.ZIP_NAME}"
                 }
             }
@@ -305,31 +338,78 @@ pipeline {
         stage('Publish to Jenkins') {
         // ─────────────────────────────────────────────────────
             steps {
-                // JUnit XML — keeps all historical runs on the build page
+                // Publish Allure Report (this creates beautiful trend graphs)
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: env.ALLURE_RESULTS]]
+                ])
+                
+                // JUnit XML fallback — keeps all historical runs on the build page
                 junit(
-                    testResults     : "${env.RESULTS_DIR}/**/junit.xml",
+                    testResults: "${env.RESULTS_DIR}/**/junit.xml",
                     allowEmptyResults: true,
-                    keepLongStdio   : true
+                    keepLongStdio: true
                 )
 
                 // HTML Report — accessible from the left-hand build menu
                 publishHTML([
-                    allowMissing         : true,
+                    allowMissing: true,
                     alwaysLinkToLastBuild: true,
-                    keepAll              : true,
-                    reportDir            : "${env.REPORT_DIR}",
-                    reportFiles          : 'index.html',
-                    reportName           : "Playwright Report - Build #${BUILD_NUMBER}"
+                    keepAll: true,
+                    reportDir: "${env.REPORT_DIR}",
+                    reportFiles: 'index.html',
+                    reportName: "Playwright HTML Report"
+                ])
+                
+                // Publish Allure HTML report as additional artifact
+                publishHTML([
+                    allowMissing: true,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: "${env.ALLURE_REPORT}",
+                    reportFiles: 'index.html',
+                    reportName: "Allure Framework Report"
                 ])
 
                 // Archive the ZIP and all raw artifacts for download
                 archiveArtifacts(
-                    artifacts          : "${env.ZIP_NAME}, ${env.RESULTS_DIR}/**/*",
-                    fingerprint        : true,
-                    allowEmptyArchive  : true
+                    artifacts: "${env.ZIP_NAME}, ${env.RESULTS_DIR}/**/*, ${env.ALLURE_RESULTS}/**/*",
+                    fingerprint: true,
+                    allowEmptyArchive: true
                 )
 
-                echo "Reports published. View at: ${BUILD_URL}Playwright_Report/"
+                // Add build description with summary
+                script {
+                    def totalTests = 0
+                    def failedTests = 0
+                    
+                    // Try to parse JUnit results for summary
+                    try {
+                        def junitFile = findFiles(glob: "${env.RESULTS_DIR}/**/junit.xml")
+                        if (junitFile.length > 0) {
+                            def junitContent = readFile(junitFile[0].path)
+                            def testsMatch = (junitContent =~ 'tests="(\\d+)"')
+                            def failuresMatch = (junitContent =~ 'failures="(\\d+)"')
+                            
+                            if (testsMatch.find()) totalTests = testsMatch[0][1].toInteger()
+                            if (failuresMatch.find()) failedTests = failuresMatch[0][1].toInteger()
+                            
+                            def passRate = totalTests > 0 ? ((totalTests - failedTests) / totalTests * 100).round(1) : 0
+                            currentBuild.description = "Playwright: ${passRate}% pass (${totalTests - failedTests}/${totalTests}) | Browser: ${params.BROWSER}"
+                        }
+                    } catch (Exception e) {
+                        echo "Could not parse test results for summary: ${e.getMessage()}"
+                        currentBuild.description = "Playwright Tests - Build #${BUILD_NUMBER} - ${params.BROWSER}"
+                    }
+                }
+
+                echo "Reports published. View at:"
+                echo "  - Allure Report: ${BUILD_URL}allure/"
+                echo "  - HTML Report: ${BUILD_URL}Playwright_HTML_Report/"
+                echo "  - JUnit Results: ${BUILD_URL}testReport/"
             }
         }
 
@@ -354,15 +434,15 @@ pipeline {
         always {
             echo "Workspace cleanup ..."
             cleanWs(
-                cleanWhenSuccess   : false,
-                cleanWhenUnstable  : false,
-                cleanWhenFailure   : false,
-                cleanWhenNotBuilt  : true
+                cleanWhenSuccess: false,
+                cleanWhenUnstable: false,
+                cleanWhenFailure: false,
+                cleanWhenNotBuilt: true
             )
         }
-        success  { echo "All tests passed - Build #${BUILD_NUMBER} SUCCESS" }
+        success { echo "All tests passed - Build #${BUILD_NUMBER} SUCCESS" }
         unstable { echo "Some tests FAILED - review HTML report and email" }
-        failure  { echo "Pipeline FAILED - check console log for errors" }
+        failure { echo "Pipeline FAILED - check console log for errors" }
     }
 }
 
@@ -370,12 +450,12 @@ pipeline {
 //  HELPER — Build and send the detailed HTML email
 // =============================================================
 def sendPlaywrightEmail() {
-    def status   = currentBuild.currentResult
-    def color    = (status == 'SUCCESS') ? '#2ecc71' : (status == 'UNSTABLE') ? '#f39c12' : '#e74c3c'
+    def status = currentBuild.currentResult
+    def color = (status == 'SUCCESS') ? '#2ecc71' : (status == 'UNSTABLE') ? '#f39c12' : '#e74c3c'
     
     // Use text labels instead of emojis for maximum compatibility
     def statusLabel = (status == 'SUCCESS') ? 'PASSED' : (status == 'UNSTABLE') ? 'WARNING' : 'FAILED'
-    def subject  = "[${statusLabel}] Playwright Tests - Build #${BUILD_NUMBER} - ${params.BROWSER.toUpperCase()}"
+    def subject = "[${statusLabel}] Playwright Tests - Build #${BUILD_NUMBER} - ${params.BROWSER.toUpperCase()}"
     
     def body = """
 <!DOCTYPE html>
@@ -412,20 +492,22 @@ def sendPlaywrightEmail() {
     <h3 style="margin-top:0">Execution Summary</h3>
     <table>
       <tr><th>Parameter</th><th>Value</th></tr>
-      <tr><td>Status</th>           <td><span class="badge">${status}</span></td></tr>
-      <tr><td>Browser</th>           <td>${params.BROWSER}</td></tr>
-      <tr><td>Test Selection</th>    <td>${params.TEST_SELECTION_MODE}</td></tr>
-      <tr><td>Test Files</th>        <td>${params.TEST_FILES ?: '(all tests)'}</td></tr>
-      <tr><td>Parallel Workers</th>  <td>${params.PARALLEL_WORKERS}</td></tr>
-      <tr><td>Git Branch</th>        <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td></tr>
-      <tr><td>Git Commit</th>        <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td></tr>
-      <tr><td>Jenkins Node</th>      <td>${NODE_NAME}</td></tr>
-      <tr><td>Duration</th>          <td>${currentBuild.durationString}</td></tr>
+      <tr><td>Status</th>           <td><span class="badge">${status}</span></td>
+      <tr><td>Browser</th>           <td>${params.BROWSER}</td>
+      <tr><td>Test Selection</th>    <td>${params.TEST_SELECTION_MODE}</td>
+      <tr><td>Test Files</th>        <td>${params.TEST_FILES ?: '(all tests)'}</td>
+      <tr><td>Parallel Workers</th>  <td>${params.PARALLEL_WORKERS}</td>
+      <tr><td>Git Branch</th>        <td>${env.GIT_BRANCH_NAME ?: 'N/A'}</td>
+      <tr><td>Git Commit</th>        <td>${env.GIT_SHORT_COMMIT ?: 'N/A'}</td>
+      <tr><td>Jenkins Node</th>      <td>${NODE_NAME}</td>
+      <tr><td>Duration</th>          <td>${currentBuild.durationString}</td>
     </table>
 
     <h3>Quick Links</h3>
     <a href="${BUILD_URL}" class="btn">Build Page</a>
-    <a href="${BUILD_URL}Playwright_Report/" class="btn">HTML Report</a>
+    <a href="${BUILD_URL}allure/" class="btn">Allure Report</a>
+    <a href="${BUILD_URL}Playwright_HTML_Report/" class="btn">HTML Report</a>
+    <a href="${BUILD_URL}testReport/" class="btn">JUnit Results</a>
     <a href="${BUILD_URL}artifact/${ZIP_NAME}" class="btn">Download ZIP</a>
     <a href="${BUILD_URL}console" class="btn">Console Log</a>
 
@@ -433,6 +515,16 @@ def sendPlaywrightEmail() {
     <ul style="font-size:13px; line-height:1.9">
       <li><b>${ZIP_NAME}</b> — Full report, screenshots, videos, logs</li>
       <li><b>build.log</b> — Jenkins console output for this build</li>
+    </ul>
+
+    <h3>About Allure Framework</h3>
+    <p>The Allure report provides:</p>
+    <ul>
+      <li>Interactive test execution timeline</li>
+      <li>Detailed test steps with screenshots</li>
+      <li>Test trends over time (graphs)</li>
+      <li>Categories view for failure analysis</li>
+      <li>Retries and flaky test tracking</li>
     </ul>
 
   </div>
@@ -447,14 +539,14 @@ def sendPlaywrightEmail() {
 """
 
     emailext(
-        to               : params.EMAIL_RECIPIENTS,
-        subject          : subject,
-        body             : body,
-        mimeType         : 'text/html',
-        charset          : 'UTF-8',
-        attachLog        : true,
+        to: params.EMAIL_RECIPIENTS,
+        subject: subject,
+        body: body,
+        mimeType: 'text/html',
+        charset: 'UTF-8',
+        attachLog: true,
         attachmentsPattern: "${env.ZIP_NAME}",
-        compressLog      : true
+        compressLog: true
     )
 
     echo "Email dispatched to ${params.EMAIL_RECIPIENTS}"
