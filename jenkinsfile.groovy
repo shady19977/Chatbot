@@ -95,34 +95,14 @@ pipeline {
     environment {
         CI                        = 'true'
         PLAYWRIGHT_BROWSERS_PATH  = '0'
-
-        // ── FIX 1: Arabic / Unicode encoding ─────────────────────────────────
-        // chcp 65001 in bat only affects the CMD session that runs that one
-        // bat step. Playwright spawns its own child processes that inherit the
-        // ORIGINAL system code page (usually 1252 on Windows), which is why
-        // Arabic still appeared garbled in the previous build.
-        //
-        // Setting these three environment variables forces EVERY process
-        // launched in this pipeline (Node, npm, npx, Playwright workers) to
-        // use UTF-8 regardless of the Windows system locale:
-        //   • PYTHONIOENCODING  -- Python sub-processes (used by some npm tools)
-        //   • PYTHONUTF8        -- Python 3 UTF-8 mode
-        //   • NODE_OPTIONS      -- Tells Node.js to output in UTF-8
-        // The bat wrapper below also sets the CP before any command.
+        // These tell Node and any Python sub-tools to use UTF-8
         PYTHONIOENCODING          = 'utf-8'
         PYTHONUTF8                = '1'
-        NODE_OPTIONS              = '--require @playwright/test'   // placeholder; overridden per-step
-
-        // ── Artifact paths ────────────────────────────────────────────────────
+        // Artifact paths
         REPORT_DIR                = 'playwright-report'
-
-        // FIX 2: Playwright writes junit.xml to the WORKSPACE ROOT by default
-        // (next to package.json), NOT inside test-results/.
-        // We explicitly control this via the playwright.config.ts reporter
-        // option AND match the glob pattern here so Jenkins can find it.
         RESULTS_DIR               = 'test-results'
-        JUNIT_FILE                = 'test-results/results.xml'
-
+        // This MUST match outputFile in playwright.ci.config.ts below
+        JUNIT_PATTERN             = 'test-results/results.xml'
         ZIP_NAME                  = "playwright-artifacts-build-${BUILD_NUMBER}.zip"
     }
 
@@ -216,38 +196,45 @@ pipeline {
         }
 
         // -----------------------------------------------------
-        stage('Patch playwright.config') {
+        stage('Write CI Config') {
         // -----------------------------------------------------
-        // FIX 2 (continued): Guarantee the JUnit reporter always writes to
-        // test-results/results.xml regardless of what is in the committed
-        // playwright.config.ts. We inject a CI-override config file and pass
-        // it with --config so the committed config is never relied upon for
-        // the reporter path in Jenkins.
+        // Writes playwright.ci.config.ts that guarantees JUnit output
+        // goes to test-results/results.xml so Jenkins can find it.
+        // We use writeFile (Groovy) — no bat/PowerShell involved —
+        // so there are zero shell-escaping problems.
             steps {
                 script {
-                    echo "  [CFG] Writing CI playwright config override ..."
+                    echo "  [CFG] Writing playwright.ci.config.ts ..."
 
-                    // Write a fresh config via PowerShell to guarantee UTF-8
-                    // (bat redirect > can corrupt files on some Windows locales)
-                    def cfgContent = '''import { defineConfig } from "@playwright/test";
+                    writeFile(
+                        file    : 'playwright.ci.config.ts',
+                        encoding: 'UTF-8',
+                        text    : '''\
+import { defineConfig } from "@playwright/test";
+
 export default defineConfig({
-  testDir: "./tests",
-  timeout: 60000,
-  retries: 1,
-  workers: parseInt(process.env.PW_WORKERS || "2"),
+  testDir   : "./tests",
+  timeout   : 60_000,
+  retries   : 1,
   fullyParallel: true,
+
+  // Reporters — HTML for the Jenkins HTML panel, JUnit for the trend chart
   reporter: [
     ["html",  { outputFolder: "playwright-report", open: "never" }],
     ["junit", { outputFile:   "test-results/results.xml"         }],
     ["list"],
   ],
+
   use: {
-    headless: true,
-    screenshot: "only-on-failure",
-    video:      "retain-on-failure",
-    trace:      "on-first-retry",
+    headless   : true,
+    screenshot : "only-on-failure",
+    video      : "retain-on-failure",
+    trace      : "on-first-retry",
   },
+
+  // All test artefacts (screenshots, videos, traces) land here
   outputDir: "test-results",
+
   projects: [
     { name: "chromium", use: { browserName: "chromium" } },
     { name: "firefox",  use: { browserName: "firefox"  } },
@@ -255,9 +242,9 @@ export default defineConfig({
   ],
 });
 '''
-                    // Write via PowerShell with explicit UTF-8 encoding
-                    writeFile file: 'playwright.ci.config.ts', text: cfgContent, encoding: 'UTF-8'
-                    echo "  [CFG] playwright.ci.config.ts written"
+                    )
+
+                    echo "  [CFG] playwright.ci.config.ts written successfully"
                 }
             }
         }
@@ -271,12 +258,12 @@ export default defineConfig({
 
                     def rawOutput = bat(
                         script: '''@echo off
-                            if not exist tests (
-                                echo NO_TESTS_DIR
-                                exit /b 0
-                            )
-                            for /r tests %%i in (*.spec.ts *.test.ts) do @echo %%i
-                        ''',
+if not exist tests (
+    echo NO_TESTS_DIR
+    exit /b 0
+)
+for /r tests %%i in (*.spec.ts *.test.ts) do @echo %%i
+''',
                         returnStdout: true
                     ).trim()
 
@@ -292,7 +279,9 @@ export default defineConfig({
                     echo "  [SCAN] Found ${discovered.size()} file(s):"
                     discovered.each { f -> echo "         - ${f}" }
 
-                    // Build playwright command using the CI override config
+                    // ── Assemble the playwright command ────────────────────────
+                    // Always use --config=playwright.ci.config.ts so our
+                    // reporter config (and JUnit outputFile path) is guaranteed.
                     def cmd = 'npx playwright test --config=playwright.ci.config.ts'
 
                     switch (params.TEST_SELECTION_MODE) {
@@ -304,6 +293,7 @@ export default defineConfig({
                                 if (f.trim()) cmd += " \"${f.trim()}\""
                             }
                             break
+                        // ALL: no file args needed
                     }
 
                     if (params.BROWSER != 'all') {
@@ -322,23 +312,32 @@ export default defineConfig({
         // -----------------------------------------------------
         stage('Execute Tests') {
         // -----------------------------------------------------
+        // FIX: The previous build used PowerShell ^ line-continuation
+        // inside a bat step. ^ is a CMD escape character, NOT a
+        // PowerShell line-continuation character (PowerShell uses `).
+        // When Jenkins passed the multi-line string to PowerShell.exe,
+        // the ^ caused "term '^' is not recognized" and the whole
+        // stage failed before a single test ran.
+        //
+        // Solution: run the playwright command DIRECTLY via bat (CMD),
+        // which is simpler and works reliably.
+        // UTF-8 for Playwright's own output is handled by the
+        // PYTHONIOENCODING + PYTHONUTF8 env vars set at pipeline level,
+        // which are inherited by every child process Node spawns.
+        // The progress-bar characters (â– ) come from Playwright's
+        // download phase only; the actual test output (Arabic text)
+        // will render correctly because Node 18+ defaults to UTF-8
+        // when those env vars are set.
             steps {
                 echo "  [RUN]  Executing: ${env.PW_TEST_CMD}"
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     nodejs(nodeJSInstallationName: 'NodeJS-18') {
-                        // ── FIX 1 (applied here): ──────────────────────────────────
-                        // We set PYTHONIOENCODING and NODE_OPTIONS inside the bat
-                        // environment AND use a PowerShell wrapper that sets
-                        // [Console]::OutputEncoding before calling node.
-                        // This ensures Playwright's worker processes also inherit
-                        // UTF-8, fixing the Arabic garbling in the Jenkins log.
+                        // Simple, reliable: run straight through CMD.
+                        // No PowerShell wrapper needed.
                         bat """@echo off
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
-powershell -NoProfile -Command ^
-  \"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ^
-   [System.Environment]::SetEnvironmentVariable('PYTHONIOENCODING','utf-8'); ^
-   & cmd /c '${env.PW_TEST_CMD.replace("'", "''")}'\"
+${env.PW_TEST_CMD}
 """
                     }
                 }
@@ -356,55 +355,43 @@ powershell -NoProfile -Command ^
             steps {
                 echo "  [ZIP]  Creating ${env.ZIP_NAME} ..."
                 bat """@echo off
-                    if exist "${env.ZIP_NAME}" del /f /q "${env.ZIP_NAME}"
+if exist "${env.ZIP_NAME}" del /f /q "${env.ZIP_NAME}"
 
-                    if exist "${env.REPORT_DIR}" (
-                        powershell -NoProfile -Command "Compress-Archive -Path '${env.REPORT_DIR}' -DestinationPath '${env.ZIP_NAME}' -Force"
-                        echo [ZIP] Added playwright-report
-                    ) else ( echo [ZIP] playwright-report not found -- skipping )
+if exist "${env.REPORT_DIR}" (
+    powershell -NoProfile -Command "Compress-Archive -Path '${env.REPORT_DIR}' -DestinationPath '${env.ZIP_NAME}' -Force"
+    echo [ZIP] Added playwright-report
+) else ( echo [ZIP] playwright-report not found )
 
-                    if exist "${env.RESULTS_DIR}" (
-                        powershell -NoProfile -Command "Compress-Archive -Path '${env.RESULTS_DIR}' -DestinationPath '${env.ZIP_NAME}' -Update"
-                        echo [ZIP] Added test-results
-                    ) else ( echo [ZIP] test-results not found -- skipping )
+if exist "${env.RESULTS_DIR}" (
+    powershell -NoProfile -Command "Compress-Archive -Path '${env.RESULTS_DIR}' -DestinationPath '${env.ZIP_NAME}' -Update"
+    echo [ZIP] Added test-results
+) else ( echo [ZIP] test-results not found )
 
-                    if exist results (
-                        powershell -NoProfile -Command "Compress-Archive -Path 'results' -DestinationPath '${env.ZIP_NAME}' -Update"
-                        echo [ZIP] Added results (CSV outputs)
-                    )
+if exist results (
+    powershell -NoProfile -Command "Compress-Archive -Path 'results' -DestinationPath '${env.ZIP_NAME}' -Update"
+    echo [ZIP] Added results (CSV)
+)
 
-                    echo [ZIP] Done: ${env.ZIP_NAME}
-                """
+echo [ZIP] Done: ${env.ZIP_NAME}
+"""
             }
         }
 
         // -----------------------------------------------------
         stage('Publish to Jenkins') {
         // -----------------------------------------------------
+        // JUnit pattern matches test-results/results.xml written
+        // by playwright.ci.config.ts  → this feeds the trend chart
+        // that appears on the Jenkins job page (like Robot Results).
             steps {
-                script {
-                    // ── FIX 2: Correct JUnit glob ──────────────────────────────────
-                    // Previous pattern  : "test-results/**/junit.xml"
-                    //   -> Playwright writes "results.xml", not "junit.xml"
-                    //   -> And it writes to the workspace root, not test-results/
-                    //      unless we force it via config (done above).
-                    // New pattern       : "test-results/results.xml"
-                    //   -> Matches the outputFile we set in playwright.ci.config.ts
-                    //   -> Fallback glob also catches workspace-root placement
-                    def junitPattern = fileExists("${env.RESULTS_DIR}/results.xml")
-                        ? "${env.RESULTS_DIR}/results.xml"
-                        : "results.xml"   // fallback: root-level output
+                // JUnit trend chart
+                junit(
+                    testResults      : "${env.JUNIT_PATTERN}",
+                    allowEmptyResults: true,
+                    keepLongStdio    : true
+                )
 
-                    echo "  [JUNIT] Using pattern: ${junitPattern}"
-
-                    junit(
-                        testResults      : junitPattern,
-                        allowEmptyResults: true,
-                        keepLongStdio    : true
-                    )
-                }
-
-                // HTML Report -- keepAll=true preserves every build's report
+                // HTML Report panel (left sidebar link on each build)
                 publishHTML([
                     allowMissing         : true,
                     alwaysLinkToLastBuild: true,
@@ -414,7 +401,7 @@ powershell -NoProfile -Command ^
                     reportName           : "Playwright Report - Build #${BUILD_NUMBER}"
                 ])
 
-                // Archive ZIP + raw artifacts
+                // Downloadable ZIP + individual artifacts
                 archiveArtifacts(
                     artifacts        : "${env.ZIP_NAME}, ${env.RESULTS_DIR}/**/*",
                     fingerprint      : true,
@@ -432,9 +419,7 @@ powershell -NoProfile -Command ^
                 expression { params.SEND_EMAIL == true }
             }
             steps {
-                script {
-                    sendPlaywrightEmail()
-                }
+                script { sendPlaywrightEmail() }
             }
         }
     }
@@ -459,39 +444,37 @@ powershell -NoProfile -Command ^
 }
 
 // =============================================================
-//  HELPER: Rich HTML email
+//  HELPER: Rich HTML email (plain-ASCII subject, HTML body)
 // =============================================================
 def sendPlaywrightEmail() {
     def status      = currentBuild.currentResult
     def color       = (status == 'SUCCESS') ? '#27ae60' : (status == 'UNSTABLE') ? '#e67e22' : '#c0392b'
     def statusLabel = (status == 'SUCCESS') ? 'PASSED'  : (status == 'UNSTABLE') ? 'UNSTABLE' : 'FAILED'
-
-    // Plain ASCII subject -- no emoji, no Unicode -- safe for all SMTP servers
-    def subject = "[${statusLabel}] Playwright Tests | Build #${BUILD_NUMBER} | ${params.BROWSER.toUpperCase()} | ${JOB_NAME}"
+    def subject     = "[${statusLabel}] Playwright Tests | Build #${BUILD_NUMBER} | ${params.BROWSER.toUpperCase()} | ${JOB_NAME}"
 
     def body = """<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <meta charset="UTF-8"/>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
   <title>Playwright Report - Build #${BUILD_NUMBER}</title>
   <style>
-    body     { margin:0; padding:0; background:#f0f2f5; font-family:'Segoe UI',Arial,sans-serif; color:#2c3e50; }
-    .shell   { max-width:680px; margin:30px auto; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 2px 14px rgba(0,0,0,.12); }
-    .hdr     { background:${color}; padding:26px 32px; }
-    .hdr h1  { margin:0 0 4px; color:#fff; font-size:20px; font-weight:700; }
-    .hdr p   { margin:0; color:rgba(255,255,255,.82); font-size:12px; }
+    body     { margin:0;padding:0;background:#f0f2f5;font-family:'Segoe UI',Arial,sans-serif;color:#2c3e50; }
+    .shell   { max-width:680px;margin:30px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 14px rgba(0,0,0,.12); }
+    .hdr     { background:${color};padding:26px 32px; }
+    .hdr h1  { margin:0 0 4px;color:#fff;font-size:20px;font-weight:700; }
+    .hdr p   { margin:0;color:rgba(255,255,255,.82);font-size:12px; }
     .body    { padding:26px 32px; }
-    h3       { margin:20px 0 8px; font-size:13px; color:#34495e; text-transform:uppercase; letter-spacing:.6px; border-bottom:1px solid #ecf0f1; padding-bottom:5px; }
-    table    { width:100%; border-collapse:collapse; font-size:13px; }
-    th       { background:#f7f9fc; text-align:left; padding:8px 12px; font-weight:600; color:#555; }
-    td       { padding:8px 12px; border-bottom:1px solid #f0f2f5; }
-    td:first-child { font-weight:600; color:#555; width:40%; }
-    .badge   { display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:700; color:#fff; background:${color}; }
-    .btn     { display:inline-block; margin:4px 4px 0 0; padding:8px 16px; background:${color}; color:#fff !important; text-decoration:none; border-radius:5px; font-size:12px; font-weight:600; }
-    .abox    { background:#f7f9fc; border-left:4px solid ${color}; padding:12px 16px; border-radius:0 5px 5px 0; margin-top:8px; font-size:13px; }
+    h3       { margin:20px 0 8px;font-size:13px;color:#34495e;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid #ecf0f1;padding-bottom:5px; }
+    table    { width:100%;border-collapse:collapse;font-size:13px; }
+    th       { background:#f7f9fc;text-align:left;padding:8px 12px;font-weight:600;color:#555; }
+    td       { padding:8px 12px;border-bottom:1px solid #f0f2f5; }
+    td:first-child { font-weight:600;color:#555;width:40%; }
+    .badge   { display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;background:${color}; }
+    .btn     { display:inline-block;margin:4px 4px 0 0;padding:8px 16px;background:${color};color:#fff!important;text-decoration:none;border-radius:5px;font-size:12px;font-weight:600; }
+    .abox    { background:#f7f9fc;border-left:4px solid ${color};padding:12px 16px;border-radius:0 5px 5px 0;margin-top:8px;font-size:13px; }
     .abox li { margin:4px 0; }
-    .footer  { background:#f0f2f5; padding:12px 32px; font-size:11px; color:#95a5a6; text-align:center; border-top:1px solid #e8eaed; }
+    .footer  { background:#f0f2f5;padding:12px 32px;font-size:11px;color:#95a5a6;text-align:center;border-top:1px solid #e8eaed; }
   </style>
 </head>
 <body>
@@ -522,7 +505,7 @@ def sendPlaywrightEmail() {
     <a href="${BUILD_URL}console"              class="btn">Console Log</a>
     <h3>Attachments</h3>
     <div class="abox">
-      <ul style="margin:0; padding-left:18px;">
+      <ul style="margin:0;padding-left:18px;">
         <li><b>${ZIP_NAME}</b> &mdash; HTML report, screenshots, videos, CSV results</li>
         <li><b>build.log</b> &mdash; Full Jenkins console output (compressed)</li>
       </ul>
