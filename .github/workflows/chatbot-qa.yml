@@ -1,6 +1,8 @@
 name: Chatbot QA Automation
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ──────────────────────────────────────────────────────────────────────────────
 on:
   push:
     branches: [main, master, develop]
@@ -16,56 +18,343 @@ on:
       - 'playwright-report/**'
       - 'results/**'
 
+  # Daily scheduled run at 02:00 UTC (optional - remove if not needed)
+  schedule:
+    - cron: '0 2 * * *'
+
   workflow_dispatch:
     inputs:
+      # ── Environment & Target ──────────────────────────────────────────────
+      environment:
+        description: '🌍 Target Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - qa
+          - staging
+          - production
+
       base_url:
-        description: 'Base URL of the target application (leave blank for default)'
+        description: '🔗 Base URL (leave blank to use environment default)'
         required: false
         default: ''
+
+      # ── Browser Selection ─────────────────────────────────────────────────
+      browser:
+        description: '🌐 Browser'
+        required: true
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+          - all
+
+      headless:
+        description: '👁️ Run Headless?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      # ── Test Selection ────────────────────────────────────────────────────
+      test_suite:
+        description: '🧪 Test Suite'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - smoke
+          - regression
+          - chatbot
+          - login
+          - api
+          - custom
+
+      custom_test_path:
+        description: '📂 Custom test path (when suite=custom). Comma-separated for multiple files.'
+        required: false
+        default: ''
+
+      grep_tag:
+        description: '🏷️ Filter by tag (e.g. @smoke, @regression, @critical)'
+        required: false
+        default: ''
+
+      grep_invert:
+        description: '🚫 Exclude tests matching grep_tag instead of including them'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+      # ── Execution Tuning ──────────────────────────────────────────────────
+      workers:
+        description: '👷 Parallel workers'
+        required: true
+        default: '4'
+
+      retries:
+        description: '🔁 Retries for failed tests'
+        required: true
+        default: '1'
+
+      execution_delay_minutes:
+        description: '⏳ Delay execution by N minutes (0 = run immediately)'
+        required: false
+        default: '0'
+
+      # ── Data ──────────────────────────────────────────────────────────────
       input_csv:
-        description: 'Path to questions CSV relative to repo root'
+        description: '📄 Path to questions CSV'
         required: false
         default: 'data/questions.csv'
 
-# Allow workflow to push commits and create issues
+      # ── Notifications ─────────────────────────────────────────────────────
+      send_email:
+        description: '📧 Send email notification?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      create_issue:
+        description: '📝 Create GitHub issue with report?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      commit_report:
+        description: '💾 Commit index.html + CSV back to branch?'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Permissions
+# ──────────────────────────────────────────────────────────────────────────────
 permissions:
   contents: write
   issues: write
 
-# ── Job ───────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Jobs
+# ──────────────────────────────────────────────────────────────────────────────
 jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 1: Discover available test files (informational + dynamic discovery)
+  # ─────────────────────────────────────────────────────────────────────────
+  discover-tests:
+    name: 🔍 Discover Test Files
+    runs-on: ubuntu-latest
+    outputs:
+      test_count: ${{ steps.discover.outputs.test_count }}
+      test_files: ${{ steps.discover.outputs.test_files }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Discover test files
+        id: discover
+        run: |
+          echo "🔎 Scanning tests/ directory..."
+          if [ -d "tests" ]; then
+            FILES=$(find tests -type f \( -name "*.spec.js" -o -name "*.spec.ts" -o -name "*.test.js" -o -name "*.test.ts" \) 2>/dev/null | sort)
+            COUNT=$(echo "$FILES" | grep -c . || echo "0")
+          else
+            FILES=""
+            COUNT=0
+          fi
+
+          echo "test_count=$COUNT" >> $GITHUB_OUTPUT
+          # Convert to JSON array for matrix usage
+          FILES_JSON=$(echo "$FILES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "test_files=$FILES_JSON" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "════════════════════════════════════════════════════════════"
+          echo "  📂 Found $COUNT test file(s):"
+          echo "════════════════════════════════════════════════════════════"
+          echo "$FILES" | sed 's/^/    • /'
+          echo "════════════════════════════════════════════════════════════"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # JOB 2: Run QA Automation
+  # ─────────────────────────────────────────────────────────────────────────
   chatbot-qa:
-    name: Run Chatbot QA, Commit Report & Send Email
+    name: 🧪 Run Chatbot QA & Publish Report
+    needs: discover-tests
     runs-on: ubuntu-latest
     timeout-minutes: 450
 
     steps:
-      # ── 1. Checkout repository ────────────────────────────────────────────────
+      # ── 1. Checkout repository ───────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 2. Setup Node.js 20 ───────────────────────────────────────────────────
+      # ── 2. Display run configuration ─────────────────────────────────────
+      - name: Display run configuration
+        run: |
+          echo "════════════════════════════════════════════════════════════"
+          echo "  🎯 RUN CONFIGURATION"
+          echo "════════════════════════════════════════════════════════════"
+          echo "  Trigger        : ${{ github.event_name }}"
+          echo "  Branch         : ${{ github.ref_name }}"
+          echo "  Actor          : ${{ github.actor }}"
+          echo "  Run Number     : #${{ github.run_number }}"
+          echo "  Tests Found    : ${{ needs.discover-tests.outputs.test_count }}"
+          echo "  ──────────────────────────────────────────────────────────"
+          echo "  Environment    : ${{ github.event.inputs.environment || 'qa (default)' }}"
+          echo "  Browser        : ${{ github.event.inputs.browser || 'chromium (default)' }}"
+          echo "  Headless       : ${{ github.event.inputs.headless || 'true (default)' }}"
+          echo "  Test Suite     : ${{ github.event.inputs.test_suite || 'all (default)' }}"
+          echo "  Custom Path    : ${{ github.event.inputs.custom_test_path || '(none)' }}"
+          echo "  Grep Tag       : ${{ github.event.inputs.grep_tag || '(none)' }}"
+          echo "  Grep Invert    : ${{ github.event.inputs.grep_invert || 'false' }}"
+          echo "  Workers        : ${{ github.event.inputs.workers || '4 (default)' }}"
+          echo "  Retries        : ${{ github.event.inputs.retries || '1 (default)' }}"
+          echo "  Delay (min)    : ${{ github.event.inputs.execution_delay_minutes || '0' }}"
+          echo "  Input CSV      : ${{ github.event.inputs.input_csv || 'data/questions.csv (default)' }}"
+          echo "  ──────────────────────────────────────────────────────────"
+          echo "  Send Email     : ${{ github.event.inputs.send_email || 'true (default)' }}"
+          echo "  Create Issue   : ${{ github.event.inputs.create_issue || 'true (default)' }}"
+          echo "  Commit Report  : ${{ github.event.inputs.commit_report || 'true (default)' }}"
+          echo "════════════════════════════════════════════════════════════"
+
+      # ── 3. Setup Node.js 20 ──────────────────────────────────────────────
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # ── 3. Install dependencies ────────────────────────────────────────────────
+      # ── 4. Install dependencies ──────────────────────────────────────────
       - name: Install dependencies
         run: npm ci
 
-      # ── 4. Install Playwright Chromium ─────────────────────────────────────────
-      - name: Install Playwright Chromium + OS dependencies
-        run: npx playwright install chromium --with-deps
+      # ── 5. Install Playwright browsers (only what's needed) ──────────────
+      - name: Install Playwright browsers
+        run: |
+          BROWSER="${{ github.event.inputs.browser || 'chromium' }}"
+          if [ "$BROWSER" = "all" ]; then
+            echo "📦 Installing all browsers"
+            npx playwright install --with-deps
+          else
+            echo "📦 Installing $BROWSER only"
+            npx playwright install $BROWSER --with-deps
+          fi
 
-      # ── 5. Run Playwright tests ────────────────────────────────────────────────
+      # ── 6. Delay execution if requested ──────────────────────────────────
+      - name: Delay execution
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.execution_delay_minutes != '0' && github.event.inputs.execution_delay_minutes != '' }}
+        run: |
+          DELAY_MIN="${{ github.event.inputs.execution_delay_minutes }}"
+          DELAY_SEC=$(( DELAY_MIN * 60 ))
+          echo "⏳ Delaying execution for $DELAY_MIN minute(s) ($DELAY_SEC seconds)..."
+          echo "   Resuming at: $(date -u -d "+${DELAY_MIN} minutes" '+%Y-%m-%d %H:%M:%S UTC')"
+          sleep $DELAY_SEC
+          echo "✅ Delay complete, starting tests at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+      # ── 7. Build dynamic Playwright command ──────────────────────────────
+      - name: Build Playwright command
+        id: playwright_command
+        run: |
+          # Defaults applied when not workflow_dispatch
+          BROWSER="${{ github.event.inputs.browser || 'chromium' }}"
+          WORKERS="${{ github.event.inputs.workers || '4' }}"
+          RETRIES="${{ github.event.inputs.retries || '1' }}"
+          SUITE="${{ github.event.inputs.test_suite || 'all' }}"
+          HEADLESS="${{ github.event.inputs.headless || 'true' }}"
+          CUSTOM_PATH="${{ github.event.inputs.custom_test_path }}"
+          GREP_TAG="${{ github.event.inputs.grep_tag }}"
+          GREP_INVERT="${{ github.event.inputs.grep_invert || 'false' }}"
+
+          CMD="npx playwright test"
+
+          # Browser project flag (skip if "all" - lets Playwright run all configured projects)
+          if [ "$BROWSER" != "all" ]; then
+            CMD="$CMD --project=$BROWSER"
+          fi
+
+          # Workers & retries
+          CMD="$CMD --workers=$WORKERS --retries=$RETRIES"
+
+          # Headed mode
+          if [ "$HEADLESS" = "false" ]; then
+            CMD="$CMD --headed"
+          fi
+
+          # Test suite path mapping
+          case "$SUITE" in
+            smoke)
+              [ -d "tests/smoke" ] && CMD="$CMD tests/smoke/"
+              ;;
+            regression)
+              [ -d "tests/regression" ] && CMD="$CMD tests/regression/"
+              ;;
+            chatbot)
+              [ -d "tests/chatbot" ] && CMD="$CMD tests/chatbot/"
+              ;;
+            login)
+              [ -d "tests/login" ] && CMD="$CMD tests/login/"
+              ;;
+            api)
+              [ -d "tests/api" ] && CMD="$CMD tests/api/"
+              ;;
+            custom)
+              if [ -n "$CUSTOM_PATH" ]; then
+                # Support comma-separated paths
+                PATHS=$(echo "$CUSTOM_PATH" | tr ',' ' ')
+                CMD="$CMD $PATHS"
+              else
+                echo "⚠️  Suite=custom but no custom_test_path provided — running all tests"
+              fi
+              ;;
+            all|*)
+              # No path filter — Playwright runs everything
+              ;;
+          esac
+
+          # Grep filter (include or invert)
+          if [ -n "$GREP_TAG" ]; then
+            if [ "$GREP_INVERT" = "true" ]; then
+              CMD="$CMD --grep-invert \"$GREP_TAG\""
+            else
+              CMD="$CMD --grep \"$GREP_TAG\""
+            fi
+          fi
+
+          echo "command=$CMD" >> $GITHUB_OUTPUT
+          echo ""
+          echo "════════════════════════════════════════════════════════════"
+          echo "  🚀 Generated Playwright command:"
+          echo "  $CMD"
+          echo "════════════════════════════════════════════════════════════"
+
+      # ── 8. Run Playwright tests ──────────────────────────────────────────
       - name: Run Playwright tests
         env:
           CI: 'true'
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'qa' }}
           BASE_URL: ${{ github.event.inputs.base_url || secrets.BASE_URL || 'http://hasibcore.hasib.com.sa:8090' }}
           LOGIN_PATH: ${{ secrets.LOGIN_PATH || '/HPA.NBU.V3/#!/login' }}
           APP_USERNAME: ${{ secrets.APP_USERNAME || 'portaladmin' }}
@@ -74,10 +363,16 @@ jobs:
           OUTPUT_DIR: results
           CHAT_RESPONSE_TIMEOUT_MS: '1200000'
           INTER_QUESTION_DELAY_MS: '2000'
-        run: npx playwright test --project=chromium --workers=4
+        run: |
+          echo "🚀 Starting test execution..."
+          echo "   Environment : $ENVIRONMENT"
+          echo "   Base URL    : $BASE_URL"
+          echo "   Input CSV   : $INPUT_CSV"
+          echo ""
+          eval "${{ steps.playwright_command.outputs.command }}"
         continue-on-error: true
 
-      # ── 7. Find and store latest CSV file path ─────────────────────────────────
+      # ── 9. Find latest CSV file path ─────────────────────────────────────
       - name: Find latest CSV file
         id: csv_file
         if: always()
@@ -87,6 +382,7 @@ jobs:
             echo "csv_found=false" >> $GITHUB_OUTPUT
             echo "csv_path=" >> $GITHUB_OUTPUT
             echo "csv_name=no-results.csv" >> $GITHUB_OUTPUT
+            echo "⚠️  No CSV files found in results/"
           else
             echo "csv_found=true" >> $GITHUB_OUTPUT
             echo "csv_path=$LATEST_CSV" >> $GITHUB_OUTPUT
@@ -94,42 +390,54 @@ jobs:
             echo "✅ Latest CSV found: $LATEST_CSV"
           fi
 
-      # ── 8. Compress all logs and reports as ZIP ────────────────────────────────
-      - name: Compress logs and playwright report
+      # ── 10. Compress all logs and reports as ZIP ─────────────────────────
+      - name: Compress logs and Playwright report
         if: always()
         run: |
           mkdir -p artifacts
-          
-          # Compress results folder
+
           if [ -d "results" ]; then
             zip -r artifacts/logs-run-${{ github.run_number }}.zip results/ -q 2>/dev/null || true
             echo "✅ Created logs-run-${{ github.run_number }}.zip"
           fi
-          
-          # Compress playwright-report folder
+
           if [ -d "playwright-report" ]; then
             zip -r artifacts/playwright-report-run-${{ github.run_number }}.zip playwright-report/ -q 2>/dev/null || true
             echo "✅ Created playwright-report-run-${{ github.run_number }}.zip"
           fi
-          
-          ls -lh artifacts/
 
-      # ── 9. Git - Configure user identity ───────────────────────────────────────
-      - name: Configure git
+          ls -lh artifacts/ 2>/dev/null || echo "No artifacts created"
+
+      # ── 11. Upload artifacts to GitHub Actions ───────────────────────────
+      - name: Upload artifacts
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-results-run-${{ github.run_number }}
+          path: |
+            artifacts/
+            results/
+            playwright-report/
+            index.html
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ── 12. Git - Configure user identity ────────────────────────────────
+      - name: Configure git
+        if: ${{ always() && (github.event.inputs.commit_report == 'true' || github.event_name != 'workflow_dispatch') }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # ── 10. Git - Pull latest changes ──────────────────────────────────────────
+      # ── 13. Git - Pull latest changes ────────────────────────────────────
       - name: Pull latest changes
-        if: always()
+        if: ${{ always() && (github.event.inputs.commit_report == 'true' || github.event_name != 'workflow_dispatch') }}
         run: |
           git pull --rebase --autostash origin "${{ github.ref_name }}" || true
 
-      # ── 11. Git - Copy index.html from playwright-report to root ─────────────────
+      # ── 14. Copy index.html to root ──────────────────────────────────────
       - name: Copy index.html to root directory
-        if: always()
+        if: ${{ always() && (github.event.inputs.commit_report == 'true' || github.event_name != 'workflow_dispatch') }}
         run: |
           if [ -f "playwright-report/index.html" ]; then
             cp playwright-report/index.html index.html
@@ -138,121 +446,164 @@ jobs:
             echo "⚠️  index.html not found in playwright-report/"
           fi
 
-      # ── 12. Git - Stage index.html and latest CSV ─────────────────────────────
+      # ── 15. Stage files for commit ───────────────────────────────────────
       - name: Stage index.html and CSV for commit
-        if: always()
+        if: ${{ always() && (github.event.inputs.commit_report == 'true' || github.event_name != 'workflow_dispatch') }}
         run: |
-          # Stage copied index.html from root
           if [ -f "index.html" ]; then
             git add index.html
-            echo "✅ Staged: index.html (from root)"
-          else
-            echo "⚠️  index.html not found in root directory"
+            echo "✅ Staged: index.html"
           fi
-          
-          # Stage latest CSV from results folder
+
           if [ "${{ steps.csv_file.outputs.csv_found }}" = "true" ]; then
             git add "${{ steps.csv_file.outputs.csv_path }}"
-            echo "✅ Staged: ${{ steps.csv_file.outputs.csv_name }} (from results/)"
-          else
-            echo "⚠️  No CSV file found in results folder"
+            echo "✅ Staged: ${{ steps.csv_file.outputs.csv_name }}"
           fi
-          
-          # Show what's staged
+
           echo ""
           echo "📋 Staged files:"
           git diff --cached --name-only
 
-      # ── 13. Git - Commit and push ──────────────────────────────────────────────
+      # ── 16. Commit and push ──────────────────────────────────────────────
       - name: Commit and push to branch
-        if: always()
+        if: ${{ always() && (github.event.inputs.commit_report == 'true' || github.event_name != 'workflow_dispatch') }}
         run: |
           if git diff --cached --quiet; then
             echo "ℹ️  No changes to commit"
             exit 0
           fi
-          
+
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          
-          git commit -m "ci(report): QA run #${{ github.run_number }} — ${TIMESTAMP}" -m "Branch  : ${{ github.ref_name }}" -m "Actor   : ${{ github.actor }}" -m "Run URL : ${RUN_URL}" -m "[skip ci]"
-          
+
+          git commit \
+            -m "ci(report): QA run #${{ github.run_number }} — ${TIMESTAMP}" \
+            -m "Branch      : ${{ github.ref_name }}" \
+            -m "Actor       : ${{ github.actor }}" \
+            -m "Environment : ${{ github.event.inputs.environment || 'qa' }}" \
+            -m "Browser     : ${{ github.event.inputs.browser || 'chromium' }}" \
+            -m "Suite       : ${{ github.event.inputs.test_suite || 'all' }}" \
+            -m "Run URL     : ${RUN_URL}" \
+            -m "[skip ci]"
+
           git push origin "HEAD:${{ github.ref_name }}"
           echo "✅ Pushed index.html + CSV to ${{ github.ref_name }}"
 
-      # ── 14. Send email with report, CSV, and logs ──────────────────────────────
+      # ── 17. Send email with report ───────────────────────────────────────
       - name: Send QA Report Email
-        if: always()
+        if: ${{ always() && (github.event.inputs.send_email == 'true' || github.event_name != 'workflow_dispatch') }}
         uses: dawidd6/action-send-mail@v3
         continue-on-error: true
         with:
           server_address: smtp.gmail.com
           server_port: 465
-          username: <gmail account email>
-          password: <App password generated from Gmail account>
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
           secure: true
-          subject: '✅ Chatbot QA Report — Run #${{ github.run_number }}'
-          to: '<gmail account email>'
-          from: '<gmail account email>'
+          subject: '✅ Chatbot QA Report — Run #${{ github.run_number }} [${{ github.event.inputs.environment || ''qa'' }} / ${{ github.event.inputs.browser || ''chromium'' }}]'
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USERNAME }}
           body: |
             Chatbot QA Automation Report
             ════════════════════════════════════════════════════════════
-            
+
             📊 Run Information:
-              Repository  : ${{ github.repository }}
-              Branch      : ${{ github.ref_name }}
-              Run Number  : #${{ github.run_number }}
-              Triggered   : ${{ github.actor }}
-              Timestamp   : ${{ job.status }}
-            
+              Repository     : ${{ github.repository }}
+              Branch         : ${{ github.ref_name }}
+              Run Number     : #${{ github.run_number }}
+              Triggered By   : ${{ github.actor }}
+              Trigger        : ${{ github.event_name }}
+              Job Status     : ${{ job.status }}
+
+            🎯 Run Configuration:
+              Environment    : ${{ github.event.inputs.environment || 'qa' }}
+              Browser        : ${{ github.event.inputs.browser || 'chromium' }}
+              Headless       : ${{ github.event.inputs.headless || 'true' }}
+              Test Suite     : ${{ github.event.inputs.test_suite || 'all' }}
+              Custom Path    : ${{ github.event.inputs.custom_test_path || '(none)' }}
+              Grep Tag       : ${{ github.event.inputs.grep_tag || '(none)' }}
+              Workers        : ${{ github.event.inputs.workers || '4' }}
+              Retries        : ${{ github.event.inputs.retries || '1' }}
+
             📁 Attached Files:
               ✓ index.html (Evaluation Report)
               ✓ ${{ steps.csv_file.outputs.csv_name }} (Latest Results CSV)
-              ✓ logs-run-${{ github.run_number }}.zip (Compressed Logs)
-              ✓ playwright-report-run-${{ github.run_number }}.zip (Playwright Report)
-            
-            🔗 View on GitHub:
-              https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
-            
-            📋 Files Committed:
-              ✓ index.html
-              ✓ ${{ steps.csv_file.outputs.csv_name }}
-            
+              ✓ logs-run-${{ github.run_number }}.zip
+              ✓ playwright-report-run-${{ github.run_number }}.zip
+
+            🔗 Links:
+              GitHub Pages : https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+              Run URL      : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+              Report       : https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html
+
             ════════════════════════════════════════════════════════════
-            Generated by GitHub Actions
+            Generated automatically by GitHub Actions
           attachments: |
             index.html,
             ${{ steps.csv_file.outputs.csv_path }},
             artifacts/logs-run-${{ github.run_number }}.zip,
             artifacts/playwright-report-run-${{ github.run_number }}.zip
 
-      # ── 15. Create GitHub Issue with QA Report ───────────────────────────────
+      # ── 18. Create GitHub Issue with QA Report ───────────────────────────
       - name: Create QA Report Issue
-        if: always()
+        if: ${{ always() && (github.event.inputs.create_issue == 'true' || github.event_name != 'workflow_dispatch') }}
         uses: actions/github-script@v7
         continue-on-error: true
         env:
           CSV_NAME: ${{ steps.csv_file.outputs.csv_name }}
           CSV_PATH: ${{ steps.csv_file.outputs.csv_path }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'qa' }}
+          BROWSER: ${{ github.event.inputs.browser || 'chromium' }}
+          SUITE: ${{ github.event.inputs.test_suite || 'all' }}
+          GREP_TAG: ${{ github.event.inputs.grep_tag || '(none)' }}
+          WORKERS: ${{ github.event.inputs.workers || '4' }}
+          RETRIES: ${{ github.event.inputs.retries || '1' }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const csvFile = process.env.CSV_NAME || 'results.csv';
             const repoUrl = context.repo.owner + '/' + context.repo.repo;
-            
+
+            const body = [
+              '## 🤖 QA Automation Report',
+              '',
+              '**Repository:** ' + repoUrl,
+              '**Branch:** `${{ github.ref_name }}`',
+              '**Status:** `${{ job.status }}`',
+              '**Triggered by:** @${{ github.actor }}',
+              '**Trigger:** `${{ github.event_name }}`',
+              '',
+              '### 🎯 Run Configuration',
+              '',
+              '| Setting | Value |',
+              '|---------|-------|',
+              '| Environment | `' + process.env.ENVIRONMENT + '` |',
+              '| Browser | `' + process.env.BROWSER + '` |',
+              '| Test Suite | `' + process.env.SUITE + '` |',
+              '| Grep Tag | `' + process.env.GREP_TAG + '` |',
+              '| Workers | `' + process.env.WORKERS + '` |',
+              '| Retries | `' + process.env.RETRIES + '` |',
+              '',
+              '### 📁 Files Committed',
+              '- `index.html` (from `playwright-report/`)',
+              '- `' + csvFile + '` (from `results/`)',
+              '',
+              '### 🔗 Links',
+              '- [Run #${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})',
+              '- [View Report](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html)',
+            ].join('\n');
+
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'QA Report - Run #${{ github.run_number }}',
-              body: `QA Automation Report\n\nRepository: ${repoUrl}\nBranch: ${{ github.ref_name }}\nStatus: ${{ job.status }}\nTriggered: ${{ github.actor }}\n\nFiles Committed:\n- index.html (from playwright-report/)\n- ${csvFile} (from results/)\n\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nReport: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html`,
+              title: '🤖 QA Report — Run #${{ github.run_number }} [' + process.env.ENVIRONMENT + ' / ' + process.env.BROWSER + ']',
+              body: body,
               labels: ['qa-report', 'automated']
             });
-            
+
             console.log('✅ QA Report Issue created successfully');
 
-
-
-      # ── 16. Print workflow summary ─────────────────────────────────────────────
+      # ── 19. Workflow summary ─────────────────────────────────────────────
       - name: Print workflow summary
         if: always()
         run: |
@@ -261,26 +612,53 @@ jobs:
           echo "  ✅ QA Automation Workflow Completed"
           echo "════════════════════════════════════════════════════════════"
           echo ""
-          echo "  📊 Repository: ${{ github.repository }}"
-          echo "  🌿 Branch    : ${{ github.ref_name }}"
-          echo "  🔢 Run       : #${{ github.run_number }}"
+          echo "  📊 Repository  : ${{ github.repository }}"
+          echo "  🌿 Branch      : ${{ github.ref_name }}"
+          echo "  🔢 Run         : #${{ github.run_number }}"
+          echo "  👤 Actor       : ${{ github.actor }}"
+          echo "  ⚡ Trigger     : ${{ github.event_name }}"
+          echo "  📌 Status      : ${{ job.status }}"
           echo ""
-          echo "  📝 Committed to GitHub:"
-          echo "     ✓ index.html (copied from playwright-report/)"
-          echo "     ✓ ${{ steps.csv_file.outputs.csv_name }} (latest from results/)"
+          echo "  🎯 Configuration:"
+          echo "     Environment : ${{ github.event.inputs.environment || 'qa' }}"
+          echo "     Browser     : ${{ github.event.inputs.browser || 'chromium' }}"
+          echo "     Suite       : ${{ github.event.inputs.test_suite || 'all' }}"
+          echo "     Workers     : ${{ github.event.inputs.workers || '4' }}"
+          echo "     Retries     : ${{ github.event.inputs.retries || '1' }}"
           echo ""
-          echo "  📧 Email Recipients:"
-          echo "     ✓ shadyahmed9719@gmail.com"
-          echo "     ✓ shadyahmedmohamed97@gmail.com"
-          echo "     ✓ s.ahmed.tr@t2.sa"
-          echo ""
-          echo "  📎 Email Attachments:"
+          echo "  📝 Outputs:"
           echo "     ✓ index.html"
           echo "     ✓ ${{ steps.csv_file.outputs.csv_name }}"
           echo "     ✓ logs-run-${{ github.run_number }}.zip"
           echo "     ✓ playwright-report-run-${{ github.run_number }}.zip"
           echo ""
-          echo "  🔗 GitHub URL:"
-          echo "     https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/index.html"
+          echo "  🔗 Run URL:"
+          echo "     https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo ""
           echo "════════════════════════════════════════════════════════════"
+
+          # Also push summary to GitHub Actions UI summary tab
+          {
+            echo "## 🤖 Chatbot QA Run #${{ github.run_number }}"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---------|-------|"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Trigger | \`${{ github.event_name }}\` |"
+            echo "| Actor | @${{ github.actor }} |"
+            echo "| Status | \`${{ job.status }}\` |"
+            echo "| Environment | \`${{ github.event.inputs.environment || 'qa' }}\` |"
+            echo "| Browser | \`${{ github.event.inputs.browser || 'chromium' }}\` |"
+            echo "| Headless | \`${{ github.event.inputs.headless || 'true' }}\` |"
+            echo "| Test Suite | \`${{ github.event.inputs.test_suite || 'all' }}\` |"
+            echo "| Grep Tag | \`${{ github.event.inputs.grep_tag || '(none)' }}\` |"
+            echo "| Workers | \`${{ github.event.inputs.workers || '4' }}\` |"
+            echo "| Retries | \`${{ github.event.inputs.retries || '1' }}\` |"
+            echo "| Delay | \`${{ github.event.inputs.execution_delay_minutes || '0' }} min\` |"
+            echo ""
+            echo "### 📁 Outputs"
+            echo "- \`index.html\`"
+            echo "- \`${{ steps.csv_file.outputs.csv_name }}\`"
+            echo "- \`logs-run-${{ github.run_number }}.zip\`"
+            echo "- \`playwright-report-run-${{ github.run_number }}.zip\`"
+          } >> $GITHUB_STEP_SUMMARY
